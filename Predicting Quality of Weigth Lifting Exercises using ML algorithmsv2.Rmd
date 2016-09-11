@@ -1,0 +1,163 @@
+---
+title: Predicting Quality of Weight Lifting Exercises using Machine Learning algorithms
+  in R
+author: "Tom Checkiewicz"
+date: "10 September 2016"
+output: html_document
+---
+
+#Synopips 
+This exercise is part of Human Activity Recognition and its purpose is to build a predictive model, which will classify "quality"
+of weight lifting exercises. Six young health participants were asked to perform one set of 10 repetitions of the Unilateral Dumbbell Biceps Curl in five different fashions: exactly according to the specification (Class A), throwing the elbows to the front (Class B), lifting the dumbbell only halfway (Class C), lowering the dumbbell only halfway (Class D) and throwing the hips to the front (Class E).
+Class A corresponds to the specified execution of the exercise, while the other 4 classes correspond to common mistakes.
+
+The data set used in this analysis comes from the following publications:
+
+Ugulino, W.; Cardador, D.; Vega, K.; Velloso, E.; Milidiu, R.; Fuks, H. Wearable Computing: Accelerometers' Data Classification of Body Postures and Movements. Proceedings of 21st Brazilian Symposium on Artificial Intelligence. Advances in Artificial Intelligence - SBIA 2012. In: Lecture Notes in Computer Science. , pp. 52-61. Curitiba, PR: Springer Berlin / Heidelberg, 2012. ISBN 978-3-642-34458-9. DOI: 10.1007/978-3-642-34459-6_6.
+This dataset is licensed under the Creative Commons license (CC BY-SA).
+Read more: http://groupware.les.inf.puc-rio.br/har#sbia_paper_section#ixzz4Jq86qeAF
+
+
+#Loading required libraries and data sets.
+
+```{r, results='hide', message=FALSE, warning=FALSE}
+library(caret)
+library(ggplot2)
+library("doParallel")
+library(ranger)
+library(corrplot)
+
+if (!file.exists("pml-training.csv")) {
+  download.file("http://d396qusza40orc.cloudfront.net/predmachlearn/pml-training.csv", destfile = "pml-training.csv")
+}
+if (!file.exists("pml-testing.csv")) {
+  download.file("http://d396qusza40orc.cloudfront.net/predmachlearn/pml-testing.csv", destfile = "pml-testing.csv")
+}
+testing <- read.csv("pml-testing.csv", sep = ",", na.strings = c("", "NA"))
+training <- read.csv("pml-training.csv", sep = ",", na.strings = c("", "NA"))
+```
+
+
+#Data Cleaning and Data Dimension Reduction
+Removing the first 7 columns as they are irrelevant
+```{r, results='hide'}
+training<- training[,7:160]
+testing <- testing[,7:160]
+```
+
+Removing columns with NAs
+```{r, results='hide'}
+non_na <- apply(is.na(training), 2, sum)==0
+training_no_na <- training[,non_na]
+```
+
+Identifing and removing variables with nearZeroVariance
+```{r, results='hide'}
+nearzv <- nearZeroVar(training_no_na[sapply(training_no_na, is.numeric)], saveMetrics = TRUE)
+training_nzv <- training_no_na[, nearzv[,'nzv']==0]
+```
+
+Plotting the Correlation Matrix
+```{r, results='hide'}
+CorMatrix <- cor(na.omit(training_nzv[sapply(training_nzv, is.numeric)]))
+```
+
+```{r, echo=FALSE}
+corrplot(CorMatrix, method = "color", type="lower", order="hclust", tl.cex = 0.65, tl.col="black", tl.srt = 45)
+```
+
+Removing the variables which are highly correlated with each other
+```{r, results='hide'}
+cor_to_be_removed <- findCorrelation(CorMatrix, cutoff = .9, verbose = TRUE)
+training_corr <- training_nzv[,-cor_to_be_removed]
+```
+
+#Splitting the training data set
+```{r, results='hide'}
+set.seed(12334)
+inTrain <- createDataPartition(training_corr$classe, p=.7, list = FALSE)
+training.set <- training_corr[inTrain, ]
+testing.set <- training_corr[-inTrain, ]
+```
+
+#Training a base model
+For a base model I decided to use Random Forest algorithm because of two main reasons: Its confirmed 
+efficiency and accuracy in dealing with high dimension data sets as well as its ability to reduce both bias and variability in the generated models.
+I will apply "ranger" package to generate the random forest model in order to lower the computation time and package "doParallel" to apply parallel processing algorithm with multicore threads.
+
+For our model, we apply cross validation method in order to increase the accuracy.
+```{r, results='hide', cache=TRUE, message=FALSE, warning=FALSE}
+nr_core<- detectCores()
+cl <-makeCluster(nr_core)
+registerDoParallel(cl)
+
+train_Control <- trainControl(method = "cv", number = 5, allowParallel = TRUE)
+set.seed(12334)
+rfmodel_base <- train(classe~., data=training.set, method="ranger", metric="Accuracy", trControl=train_Control)
+stopCluster(cl)
+```
+# Training an alternative model usign Gradient Boosting algorithm
+```{r, results='hide', cache=TRUE, message=FALSE, warning=FALSE}
+nr_core<- detectCores()
+cl <-makeCluster(nr_core)
+registerDoParallel(cl)
+set.seed(12334)
+gbmmodel <- train(classe~., data=training.set, method="gbm")
+stopCluster(cl)
+```
+
+Printing Random Forest based model
+```{r, echo=FALSE}
+print(rfmodel_base)
+```
+As we see above, the model was cross-validated (k-fold k=5) and the most accurate results are obtained with mtry = 24 with the 99.71% accuracy.
+
+Final Random Forest model parameters
+```{r, echo=FALSE}
+print(rfmodel_base$finalModel)
+```
+
+Printing Grandient Boosting based model (GBM)
+```{r, echo=FALSE}
+print(gbmmodel)
+```
+GBM based model with n.trees = 150, interaction.depth = 3, shrinkage = 0.1 and n.minobsinnode = 10 has achieved the 98.35% accuracy which 
+
+Final GBM model parameters
+```{r, echo=FALSE}
+print(rfmodel_base$finalModel)
+```
+#Model performance comparison
+
+Random Forest based algorithm boosts higher accuracy (99.71%) compared to Grandient Boosting based model (98.35%)
+
+#Cross Validating the Random Forest based model on the testing data set
+```{r, echo=TRUE, message=FALSE, warning=FALSE}
+pred_rf <- predict(rfmodel_base, newdata = testing.set)
+confusionMatrix(pred_rf, testing.set$classe)
+```
+
+#Calculating the out of sample error rate
+```{r, echo=TRUE}
+accuracy <-sum(pred_rf==testing.set$classe)/ length(testing.set$classe)
+error = 1- accuracy
+```
+
+```{r, echo=FALSE}
+print(error)
+```
+
+#Predicting the quality of weigth liffting exercises on test data set
+```{r, echo=TRUE}
+predicted_outcome <- predict(rfmodel_base, newdata = testing)
+print(predicted_outcome)
+```
+
+#Final Conclusions
+In order to meet the project course requirements we've built and trained the two models based on Random Forest and Gradient Boosting algorithms respectively. Our final choice was based on model accuracy criteria hence RandomForest based model was selected to predict the test values.
+The selected model has 99.76% accuracy with out of sample error rate of 0.002378929. It was applied to the test data set and final results have been submitted to Coursera with 100% accuracy.
+
+
+
+
+
